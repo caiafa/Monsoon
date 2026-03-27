@@ -225,41 +225,187 @@ app.get('/system', (_req, res) => {
 // ============================================================
 //  WATCHDOG
 // ============================================================
+//
+// Sequent Microsystems Multichemistry Watchdog HAT (SM-I-033)
+// CLI tool: `wdt` (from wdt-rpi, already installed)
+//
+// Key commands:
+//   wdt -r              feed watchdog (reset countdown)
+//   wdt -g vb           battery voltage in mV
+//   wdt -g vin          input (external) voltage in mV
+//   wdt -g p            get watchdog period in seconds
+//   wdt -s p <sec>      set watchdog period
+//   wdt -g rob          get restart-on-battery (0 or 1)
+//   wdt -rob <0|1>      set restart-on-battery
+//   wdt -poff           power off (no restart)
+//   wdt -g rc           get reset count (reboots triggered by watchdog)
 
-// Feed the Sequent hardware watchdog timer
+// Helper: run a wdt command, return trimmed stdout or null on failure
+function wdtExec(args) {
+  try {
+    return execSync(`wdt ${args}`, { timeout: 3000, encoding: 'utf8' }).trim();
+  } catch (err) {
+    const msg = err.stderr ? err.stderr.toString().trim() : err.message;
+    console.error(`[WATCHDOG] wdt ${args} failed: ${msg}`);
+    return null;
+  }
+}
+
+// Feed the hardware watchdog timer
 app.post('/watchdog/reset', (_req, res) => {
   if (config.DUMMY_MODE) {
     console.log('[DUMMY] watchdog reset');
     return res.json({ ok: true, action: 'watchdog_reset', dummy: true });
   }
 
-  try {
-    execSync('wdt -r', { timeout: 3000, stdio: 'pipe' });
+  const result = wdtExec('-r');
+  if (result !== null) {
     res.json({ ok: true, action: 'watchdog_reset' });
-  } catch (err) {
-    const msg = err.stderr ? err.stderr.toString().trim() : err.message;
-    console.error(`[WATCHDOG] reset failed: ${msg}`);
-    res.status(500).json({ ok: false, error: `Watchdog reset failed: ${msg}` });
+  } else {
+    res.status(500).json({ ok: false, error: 'Watchdog reset failed' });
   }
 });
 
-// Get watchdog status including battery voltage
+// Comprehensive watchdog status — battery, period, restart-on-battery, reset count
 app.get('/watchdog/status', (_req, res) => {
   if (config.DUMMY_MODE) {
-    return res.json({ ok: true, dummy: true, active: false });
+    return res.json({
+      ok: true, dummy: true,
+      battery: { mv: 4200, level: 'ok', low_threshold_mv: config.BATTERY_LOW_MV, critical_threshold_mv: config.BATTERY_CRITICAL_MV },
+      input_mv: 5000,
+      period_s: config.WATCHDOG_DEFAULT_PERIOD_S,
+      restart_on_battery: false,
+      reset_count: 0,
+    });
   }
 
-  const status = { ok: true, active: true };
+  const status = { ok: true };
 
-  try {
-    const raw = execSync('wdt -g vb', { timeout: 3000, encoding: 'utf8' }).trim();
-    status.battery_mv = parseInt(raw, 10) || null;
-  } catch {
-    status.battery_mv = null;
-    status.battery_error = 'Could not read battery voltage';
+  // Battery voltage + health assessment
+  const vbRaw = wdtExec('-g vb');
+  const battery_mv = vbRaw ? parseInt(vbRaw, 10) : null;
+  let level = 'unknown';
+  if (battery_mv !== null) {
+    if (battery_mv < config.BATTERY_CRITICAL_MV) level = 'critical';
+    else if (battery_mv < config.BATTERY_LOW_MV) level = 'low';
+    else level = 'ok';
   }
+  status.battery = {
+    mv: battery_mv,
+    level,
+    low_threshold_mv: config.BATTERY_LOW_MV,
+    critical_threshold_mv: config.BATTERY_CRITICAL_MV,
+  };
+
+  // External/input voltage (charger or power supply)
+  const vinRaw = wdtExec('-g vin');
+  status.input_mv = vinRaw ? parseInt(vinRaw, 10) : null;
+
+  // Watchdog period
+  const periodRaw = wdtExec('-g p');
+  status.period_s = periodRaw ? parseInt(periodRaw, 10) : null;
+
+  // Restart-on-battery setting
+  const robRaw = wdtExec('-g rob');
+  status.restart_on_battery = robRaw === '1';
+
+  // Reset count — how many times the watchdog has rebooted the Pi
+  const rcRaw = wdtExec('-g rc');
+  status.reset_count = rcRaw ? parseInt(rcRaw, 10) : null;
 
   res.json(status);
+});
+
+// Battery-only endpoint — lightweight, for frequent polling by dashboard
+app.get('/watchdog/battery', (_req, res) => {
+  if (config.DUMMY_MODE) {
+    return res.json({ ok: true, dummy: true, mv: 4200, level: 'ok' });
+  }
+
+  const vbRaw = wdtExec('-g vb');
+  const mv = vbRaw ? parseInt(vbRaw, 10) : null;
+
+  let level = 'unknown';
+  if (mv !== null) {
+    if (mv < config.BATTERY_CRITICAL_MV) level = 'critical';
+    else if (mv < config.BATTERY_LOW_MV) level = 'low';
+    else level = 'ok';
+  }
+
+  res.json({ ok: mv !== null, mv, level });
+});
+
+// Set watchdog timeout period (seconds). If the cron/service doesn't feed
+// within this window, the HAT hard-reboots the Pi.
+app.put('/watchdog/period', (req, res) => {
+  const seconds = parseInt(req.body.seconds, 10);
+  if (isNaN(seconds) || seconds < 10 || seconds > 65535) {
+    return res.status(400).json({ ok: false, error: 'seconds must be 10–65535' });
+  }
+
+  if (config.DUMMY_MODE) {
+    console.log(`[DUMMY] watchdog period -> ${seconds}s`);
+    return res.json({ ok: true, action: 'period_set', seconds, dummy: true });
+  }
+
+  const result = wdtExec(`-s p ${seconds}`);
+  if (result !== null) {
+    res.json({ ok: true, action: 'period_set', seconds });
+  } else {
+    res.status(500).json({ ok: false, error: 'Failed to set watchdog period' });
+  }
+});
+
+// Toggle restart-on-battery — when enabled, the Pi reboots as soon as
+// external power is restored after a battery-powered period.
+app.put('/watchdog/restart-on-battery', (req, res) => {
+  const enabled = Boolean(req.body.enabled);
+
+  if (config.DUMMY_MODE) {
+    console.log(`[DUMMY] restart-on-battery -> ${enabled}`);
+    return res.json({ ok: true, action: 'restart_on_battery', enabled, dummy: true });
+  }
+
+  const result = wdtExec(`-rob ${enabled ? 1 : 0}`);
+  if (result !== null) {
+    res.json({ ok: true, action: 'restart_on_battery', enabled });
+  } else {
+    res.status(500).json({ ok: false, error: 'Failed to set restart-on-battery' });
+  }
+});
+
+// Safe power off — cuts power via the watchdog HAT. Pi will NOT restart
+// unless external power is cycled (and restart-on-battery is enabled).
+// Requires { confirm: true } in body to prevent accidental shutdowns.
+app.post('/watchdog/power-off', (req, res) => {
+  if (req.body.confirm !== true) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Send { "confirm": true } to power off. This will cut power to the Pi.',
+    });
+  }
+
+  if (config.DUMMY_MODE) {
+    console.log('[DUMMY] power off requested');
+    return res.json({ ok: true, action: 'power_off', dummy: true });
+  }
+
+  // Turn all relays off before cutting power
+  relay.allOff();
+
+  // Respond before we lose power
+  res.json({ ok: true, action: 'power_off', message: 'Powering off in ~2 seconds' });
+
+  // Give the response time to flush, then cut power
+  setTimeout(() => {
+    console.log('[WATCHDOG] Executing power off');
+    try {
+      execSync('wdt -poff', { timeout: 3000, stdio: 'pipe' });
+    } catch {
+      // If wdt -poff fails, fall back to OS shutdown
+      execSync('shutdown -h now', { timeout: 3000, stdio: 'pipe' });
+    }
+  }, 2000);
 });
 
 // ============================================================
