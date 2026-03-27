@@ -241,12 +241,15 @@ app.get('/system', (_req, res) => {
 //   wdt -g rc           get reset count (reboots triggered by watchdog)
 
 // Helper: run a wdt command, return trimmed stdout or null on failure
-function wdtExec(args) {
+// Set quiet=true for optional/probe commands that may not be supported by all firmware versions
+function wdtExec(args, quiet = false) {
   try {
     return execSync(`wdt ${args}`, { timeout: 3000, encoding: 'utf8' }).trim();
   } catch (err) {
-    const msg = err.stderr ? err.stderr.toString().trim() : err.message;
-    console.error(`[WATCHDOG] wdt ${args} failed: ${msg}`);
+    if (!quiet) {
+      const msg = err.stderr ? err.stderr.toString().trim() : err.message;
+      console.error(`[WATCHDOG] wdt ${args} failed: ${msg}`);
+    }
     return null;
   }
 }
@@ -309,8 +312,8 @@ app.get('/watchdog/status', (_req, res) => {
   const robRaw = wdtExec('-g rob');
   status.restart_on_battery = robRaw === '1';
 
-  // Reset count — how many times the watchdog has rebooted the Pi
-  const rcRaw = wdtExec('-g rc');
+  // Reset count — not supported on all firmware versions, so probe quietly
+  const rcRaw = wdtExec('-g rc', true);
   status.reset_count = rcRaw ? parseInt(rcRaw, 10) : null;
 
   res.json(status);
