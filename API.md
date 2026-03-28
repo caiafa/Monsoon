@@ -154,6 +154,102 @@ Emergency stop. Sends a hardware-level all-off command, then clears all internal
 
 ---
 
+### POST /relay/all-on
+
+Activate all relay channels simultaneously. Intended for wiring and hardware tests.
+
+**Response (200)**
+
+```json
+{ "ok": true, "action": "all_on", "succeeded": 16, "total": 16 }
+```
+
+`succeeded` may be less than `total` if some channels are in cooldown.
+
+---
+
+### GET /relay/:id/history
+
+Per-channel activation statistics since last startup.
+
+**URL params**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | number | Channel index (0-15) |
+
+**Response (200)**
+
+```json
+{
+  "ok": true,
+  "channel": 0,
+  "toggle_count": 12,
+  "total_on_ms": 62400,
+  "last_on_at": "2026-03-28T08:15:00.000Z",
+  "last_off_at": "2026-03-28T08:15:05.023Z",
+  "currently_on": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `toggle_count` | number | Total activations since startup |
+| `total_on_ms` | number | Cumulative on-time in milliseconds |
+| `last_on_at` | string/null | ISO timestamp of last activation |
+| `last_off_at` | string/null | ISO timestamp of last deactivation |
+| `currently_on` | boolean | Current relay state |
+
+---
+
+### GET /relay/:id/safe-state
+
+Get the configured safe state for a channel (the state it should be in on startup).
+
+**URL params**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | number | Channel index (0-15) |
+
+**Response (200)**
+
+```json
+{ "ok": true, "channel": 0, "safe_state": "off" }
+```
+
+`safe_state` is `"on"` or `"off"`. Default is `"off"` for all channels.
+
+---
+
+### PUT /relay/:id/safe-state
+
+Set the safe state for a channel.
+
+**URL params**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | number | Channel index (0-15) |
+
+**Body**
+
+```json
+{ "state": "off" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `state` | string | yes | `"on"` or `"off"` |
+
+**Response (200)**
+
+```json
+{ "ok": true, "channel": 0, "safe_state": "off" }
+```
+
+---
+
 ## Watering Sequences
 
 Sequences run pumps one after another with automatic cooldown gaps between steps. The sequence runs asynchronously; poll `/sequence/status` for progress.
@@ -231,6 +327,60 @@ Abort a running sequence. Turns all relays off immediately. Remaining steps are 
 
 ```json
 { "ok": false, "error": "No sequence running" }
+```
+
+---
+
+### GET /sequence/history
+
+Past sequence runs since last startup. Returns most recent entries first.
+
+**Query params**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | number | 20 | Number of entries to return (max 50) |
+
+**Response**
+
+```json
+{
+  "entries": [
+    {
+      "started_at": "2026-03-28T08:00:00.000Z",
+      "ended_at": "2026-03-28T08:01:45.000Z",
+      "aborted": false,
+      "steps": [
+        { "pump_id": 0, "ml": 25, "index": 0, "status": "done", "actual_ms": 25000 },
+        { "pump_id": 1, "ml": 30, "index": 1, "status": "done", "actual_ms": 30000 }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Emergency Stop
+
+### POST /emergency-stop
+
+Immediately abort any running sequence and turn all relays off. Logs the reason.
+
+**Body** (optional)
+
+```json
+{ "reason": "operator override" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `reason` | string | no | Human-readable reason for the stop (logged) |
+
+**Response (200)**
+
+```json
+{ "ok": true, "action": "emergency_stop", "reason": "operator override" }
 ```
 
 ---
@@ -324,13 +474,17 @@ In-memory ring buffer of the last 200 events. Resets on restart.
 ```json
 {
   "entries": [
-    { "event": "on", "channel": 0, "timestamp": "2026-03-27T14:30:00.000Z" },
-    { "event": "off", "channel": 0, "ran_ms": 5023, "timestamp": "2026-03-27T14:30:05.023Z" },
+    { "event": "on", "channel": 0, "timestamp": "2026-03-28T08:00:00.000Z" },
+    { "event": "off", "channel": 0, "ran_ms": 5023, "timestamp": "2026-03-28T08:00:05.023Z" },
+    { "event": "pulse", "channel": 0, "duration_ms": 5000, "timestamp": "..." },
     { "event": "dispense", "pump_id": 0, "ml": 25, "calculated_ms": 25000, "timestamp": "..." },
     { "event": "safety_cutoff", "channel": 3, "timestamp": "..." },
     { "event": "sequence_start", "steps": 3, "timestamp": "..." },
     { "event": "sequence_end", "aborted": false, "steps": 3, "timestamp": "..." },
-    { "event": "all_off", "timestamp": "..." }
+    { "event": "sequence_abort", "timestamp": "..." },
+    { "event": "all_off", "timestamp": "..." },
+    { "event": "all_on", "succeeded": 16, "total": 16, "timestamp": "..." },
+    { "event": "emergency_stop", "reason": "operator override", "timestamp": "..." }
   ]
 }
 ```
@@ -381,6 +535,114 @@ Detailed system information including hardware sensors.
 | `i2c_available` | boolean | Whether `/dev/i2c-1` exists |
 | `disk` | object/null | Root filesystem usage |
 | `network` | object | External IPv4 addresses by interface name |
+
+---
+
+### PUT /system/config
+
+Update runtime config values. Changes are in-memory only and reset on service restart.
+
+**Body** (all fields optional — send only what you want to change)
+
+```json
+{
+  "battery_low_mv": 3700,
+  "battery_critical_mv": 3600,
+  "max_pump_duration_ms": 120000,
+  "min_cooldown_ms": 5000
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `battery_low_mv` | number | Battery warning threshold in mV (must be > 0) |
+| `battery_critical_mv` | number | Battery critical threshold in mV (must be > 0) |
+| `max_pump_duration_ms` | number | Safety cutoff for any single relay activation (min 1000) |
+| `min_cooldown_ms` | number | Minimum gap between activations of the same channel (min 0) |
+
+**Response (200)**
+
+```json
+{ "ok": true, "updated": { "max_pump_duration_ms": 60000 } }
+```
+
+**Errors (400)**
+
+```json
+{ "ok": false, "error": "No recognized config keys provided. Accepted: battery_low_mv, battery_critical_mv, max_pump_duration_ms, min_cooldown_ms" }
+```
+
+---
+
+### GET /metrics
+
+Prometheus-compatible metrics endpoint. Returns relay states, cumulative on-times, toggle counts, and process uptime.
+
+**Response** — `Content-Type: text/plain; version=0.0.4`
+
+```
+# HELP monsoon_relay_on Relay on state (1=on, 0=off)
+# TYPE monsoon_relay_on gauge
+monsoon_relay_on{channel="0"} 0
+monsoon_relay_on{channel="1"} 1
+...
+# HELP monsoon_relay_active_ms Current active duration in milliseconds
+# TYPE monsoon_relay_active_ms gauge
+monsoon_relay_active_ms{channel="0"} 0
+monsoon_relay_active_ms{channel="1"} 4320
+...
+# HELP monsoon_relay_toggle_total Total number of relay activations
+# TYPE monsoon_relay_toggle_total counter
+monsoon_relay_toggle_total{channel="0"} 12
+...
+# HELP monsoon_relay_on_ms_total Total milliseconds relay has been on
+# TYPE monsoon_relay_on_ms_total counter
+monsoon_relay_on_ms_total{channel="0"} 62400
+...
+# HELP monsoon_sequence_running Whether a sequence is currently running (1=yes)
+# TYPE monsoon_sequence_running gauge
+monsoon_sequence_running 0
+# HELP monsoon_process_uptime_seconds Process uptime in seconds
+# TYPE monsoon_process_uptime_seconds gauge
+monsoon_process_uptime_seconds 86400
+```
+
+---
+
+### GET /alerts
+
+Active warning conditions. Checks battery level, input power, and recent safety cutoffs.
+
+**Response**
+
+```json
+{
+  "ok": true,
+  "count": 1,
+  "alerts": [
+    {
+      "level": "warning",
+      "source": "battery",
+      "message": "Battery low: 3680mV (threshold: 3700mV)",
+      "mv": 3680
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `level` | `"warning"` or `"critical"` |
+| `source` | `"battery"`, `"power"`, or `"relay"` |
+| `message` | Human-readable description |
+
+Alert conditions checked:
+- Battery voltage below `battery_low_mv` → `warning`
+- Battery voltage below `battery_critical_mv` → `critical`
+- Input voltage below 4000mV (running on battery) → `warning`
+- Any `safety_cutoff` events in the recent log → `warning`
+
+In dummy mode, hardware checks are skipped; only log-based alerts fire.
 
 ---
 
@@ -443,6 +705,42 @@ Lightweight battery check for frequent dashboard polling.
 
 ```json
 { "ok": true, "mv": 3750, "level": "ok" }
+```
+
+---
+
+### POST /watchdog/reboot
+
+Gracefully reboot the Pi. Turns all relays off first, then issues an OS reboot after a 2-second delay so the response can be received.
+
+**Response (200)** — returned before the reboot occurs
+
+```json
+{ "ok": true, "action": "reboot", "message": "Rebooting in ~2 seconds" }
+```
+
+---
+
+### GET /watchdog/log
+
+In-memory log of watchdog-level events since last startup: resets, reboots, and power-offs.
+
+**Query params**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | number | 50 | Number of recent entries to return (max 100) |
+
+**Response**
+
+```json
+{
+  "entries": [
+    { "event": "watchdog_reset", "timestamp": "2026-03-28T08:00:00.000Z" },
+    { "event": "reboot", "timestamp": "2026-03-28T09:00:00.000Z" },
+    { "event": "power_off", "timestamp": "2026-03-28T10:00:00.000Z" }
+  ]
+}
 ```
 
 ---
@@ -532,7 +830,7 @@ All error responses follow the same shape:
 HTTP status codes used:
 - **200** — Success
 - **400** — Bad request (invalid input, cooldown, already active, etc.)
-- **404** — Resource not found (unknown pump id)
+- **404** — Resource not found (unknown pump or channel id)
 - **500** — Internal error (I2C failure, watchdog command failed)
 
 ---
@@ -545,7 +843,8 @@ HTTP status codes used:
 | Cooldown | 5s | Minimum gap between activations of the same channel |
 | Startup all-off | — | All relays forced off when the service starts |
 | Graceful shutdown | — | SIGTERM/SIGINT turn all relays off before exit |
-| Emergency stop | `/relay/all-off` | Hardware-level all-off + clear timers |
+| Emergency stop | `POST /emergency-stop` | Abort sequence + hardware all-off + logged reason |
+| Basic all-off | `POST /relay/all-off` | Hardware-level all-off + clear timers |
 | Power-off guard | `confirm: true` | Prevents accidental remote shutdown |
 
 ---
