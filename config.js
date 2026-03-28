@@ -38,4 +38,5 @@ module.exports = {
   WATCHDOG_DEFAULT_PERIOD_S,
   PORT: parseInt(process.env.MONSOON_PORT, 10) || 80,
   DUMMY_MODE: process.env.MONSOON_DUMMY !== '0', // dummy by default until hardware is wired
+  RELAY_BOARD_INDEX: parseInt(process.env.MONSOON_BOARD_INDEX, 10) || 0, // 16relind stack index (0-7)
 };
