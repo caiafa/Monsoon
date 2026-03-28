@@ -11,6 +11,16 @@ const channelState = new Map(); // channel -> { on: boolean, activatedAt: number
 const LOG_MAX = 200;
 const wateringLog = [];
 
+// Per-channel statistics (in-memory, resets on restart)
+const channelStats = new Map();
+
+// Sequence history — ring buffer
+const SEQUENCE_HISTORY_MAX = 50;
+const sequenceHistory = [];
+
+// Per-channel safe states — desired state on startup (default off)
+const safeStates = new Map();
+
 // Sequence state
 let sequenceRunning = false;
 let sequenceQueue = [];
@@ -19,6 +29,8 @@ let sequenceAborted = false;
 // Initialize all channels as off
 for (let i = 0; i < config.TOTAL_CHANNELS; i++) {
   channelState.set(i, { on: false, activatedAt: null, timer: null });
+  channelStats.set(i, { toggle_count: 0, total_on_ms: 0, last_on_at: null, last_off_at: null });
+  safeStates.set(i, false);
 }
 
 // --- I2C layer via Sequent 16relind CLI ---
@@ -105,6 +117,10 @@ function activate(channel) {
   state.on = true;
   state.activatedAt = Date.now();
 
+  const stats = channelStats.get(channel);
+  stats.toggle_count += 1;
+  stats.last_on_at = new Date().toISOString();
+
   // Safety timeout — force off after MAX_PUMP_DURATION_MS
   state.timer = setTimeout(() => {
     console.warn(`[SAFETY] Channel ${channel} hit max duration — forcing off`);
@@ -135,6 +151,10 @@ function deactivate(channel) {
   const ranMs = Date.now() - state.activatedAt;
   i2cWrite(channel, false);
   state.on = false;
+
+  const offStats = channelStats.get(channel);
+  offStats.total_on_ms += ranMs;
+  offStats.last_off_at = new Date().toISOString();
 
   log({ event: 'off', channel, ran_ms: ranMs });
   return { ok: true, channel, action: 'off', ran_ms: ranMs };
@@ -198,6 +218,7 @@ async function runSequence(steps) {
   sequenceAborted = false;
   sequenceQueue = steps.map((s, i) => ({ ...s, index: i, status: 'pending' }));
 
+  const startedAt = new Date().toISOString();
   log({ event: 'sequence_start', steps: steps.length });
 
   for (const step of sequenceQueue) {
@@ -244,6 +265,16 @@ async function runSequence(steps) {
 
   sequenceRunning = false;
   log({ event: 'sequence_end', aborted: sequenceAborted, steps: sequenceQueue.length });
+
+  const record = {
+    started_at: startedAt,
+    ended_at: new Date().toISOString(),
+    aborted: sequenceAborted,
+    steps: sequenceQueue.map(s => ({ ...s })),
+  };
+  sequenceHistory.push(record);
+  if (sequenceHistory.length > SEQUENCE_HISTORY_MAX) sequenceHistory.shift();
+
   return { ok: true, action: 'sequence_complete', steps: sequenceQueue };
 }
 
@@ -279,6 +310,55 @@ function allOff() {
   return { ok: true, action: 'all_off', channels: results.length };
 }
 
+function allOn() {
+  const results = [];
+  for (let i = 0; i < config.TOTAL_CHANNELS; i++) {
+    results.push(activate(i));
+  }
+  const succeeded = results.filter(r => r.ok).length;
+  log({ event: 'all_on', succeeded, total: config.TOTAL_CHANNELS });
+  return { ok: true, action: 'all_on', succeeded, total: config.TOTAL_CHANNELS };
+}
+
+function getChannelHistory(channel) {
+  if (channel < 0 || channel >= config.TOTAL_CHANNELS) return null;
+  const stats = channelStats.get(channel);
+  const state = channelState.get(channel);
+  return {
+    channel,
+    toggle_count: stats.toggle_count,
+    total_on_ms: stats.total_on_ms,
+    last_on_at: stats.last_on_at,
+    last_off_at: stats.last_off_at,
+    currently_on: state.on,
+  };
+}
+
+function getSequenceHistory(limit) {
+  const n = Math.min(limit || 20, SEQUENCE_HISTORY_MAX);
+  return sequenceHistory.slice(-n);
+}
+
+function getSafeState(channel) {
+  if (channel < 0 || channel >= config.TOTAL_CHANNELS) return null;
+  return safeStates.get(channel);
+}
+
+function setSafeState(channel, value) {
+  if (channel < 0 || channel >= config.TOTAL_CHANNELS) return false;
+  safeStates.set(channel, Boolean(value));
+  return true;
+}
+
+function emergencyStop(reason) {
+  if (sequenceRunning) {
+    sequenceAborted = true;
+  }
+  allOff();
+  log({ event: 'emergency_stop', reason: reason || null });
+  return { ok: true, action: 'emergency_stop', reason: reason || null };
+}
+
 // --- Status ---
 
 function getStatus() {
@@ -309,10 +389,16 @@ module.exports = {
   pulse,
   dispense,
   allOff,
+  allOn,
   getStatus,
   getLog,
+  getChannelHistory,
   runSequence,
   abortSequence,
   getSequenceStatus,
+  getSequenceHistory,
+  getSafeState,
+  setSafeState,
+  emergencyStop,
   i2cReadAll,
 };

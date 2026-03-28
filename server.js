@@ -11,6 +11,14 @@ const relay = require('./relay');
 const app = express();
 app.use(express.json());
 
+// In-memory watchdog event log
+const WATCHDOG_LOG_MAX = 100;
+const watchdogLog = [];
+function logWatchdog(event) {
+  watchdogLog.push({ timestamp: new Date().toISOString(), ...event });
+  if (watchdogLog.length > WATCHDOG_LOG_MAX) watchdogLog.shift();
+}
+
 // --- Middleware: request logging ---
 
 app.use((req, _res, next) => {
@@ -82,6 +90,41 @@ app.post('/relay/all-off', (_req, res) => {
   res.json(relay.allOff());
 });
 
+// All relays on — for wiring/hardware tests
+app.post('/relay/all-on', (_req, res) => {
+  res.json(relay.allOn());
+});
+
+// Per-channel activation history and stats
+app.get('/relay/:id/history', (req, res) => {
+  const channel = parseInt(req.params.id, 10);
+  if (isNaN(channel)) return res.status(400).json({ ok: false, error: 'Invalid channel id' });
+  const history = relay.getChannelHistory(channel);
+  if (!history) return res.status(404).json({ ok: false, error: `Channel ${channel} out of range` });
+  res.json({ ok: true, ...history });
+});
+
+// Safe state — which state this relay should be in on startup
+app.get('/relay/:id/safe-state', (req, res) => {
+  const channel = parseInt(req.params.id, 10);
+  if (isNaN(channel)) return res.status(400).json({ ok: false, error: 'Invalid channel id' });
+  const state = relay.getSafeState(channel);
+  if (state === null) return res.status(404).json({ ok: false, error: `Channel ${channel} out of range` });
+  res.json({ ok: true, channel, safe_state: state ? 'on' : 'off' });
+});
+
+app.put('/relay/:id/safe-state', (req, res) => {
+  const channel = parseInt(req.params.id, 10);
+  if (isNaN(channel)) return res.status(400).json({ ok: false, error: 'Invalid channel id' });
+  const { state } = req.body;
+  if (state !== 'on' && state !== 'off') {
+    return res.status(400).json({ ok: false, error: 'state must be "on" or "off"' });
+  }
+  const ok = relay.setSafeState(channel, state === 'on');
+  if (!ok) return res.status(404).json({ ok: false, error: `Channel ${channel} out of range` });
+  res.json({ ok: true, channel, safe_state: state });
+});
+
 // ============================================================
 //  SEQUENCE ENDPOINTS
 // ============================================================
@@ -121,6 +164,18 @@ app.post('/sequence/abort', (_req, res) => {
 // Poll sequence progress
 app.get('/sequence/status', (_req, res) => {
   res.json(relay.getSequenceStatus());
+});
+
+// Past sequence runs
+app.get('/sequence/history', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 20;
+  res.json({ entries: relay.getSequenceHistory(limit) });
+});
+
+// Emergency stop — abort sequence + all relays off + log reason
+app.post('/emergency-stop', (req, res) => {
+  const reason = req.body && req.body.reason ? String(req.body.reason) : null;
+  res.json(relay.emergencyStop(reason));
 });
 
 // ============================================================
@@ -222,6 +277,116 @@ app.get('/system', (_req, res) => {
   res.json(info);
 });
 
+// Update runtime config values (changes are in-memory only, reset on restart)
+app.put('/system/config', (req, res) => {
+  const updated = {};
+
+  if (req.body.battery_low_mv !== undefined) {
+    const val = parseInt(req.body.battery_low_mv, 10);
+    if (isNaN(val) || val <= 0) return res.status(400).json({ ok: false, error: 'battery_low_mv must be a positive integer' });
+    config.BATTERY_LOW_MV = val;
+    updated.battery_low_mv = val;
+  }
+  if (req.body.battery_critical_mv !== undefined) {
+    const val = parseInt(req.body.battery_critical_mv, 10);
+    if (isNaN(val) || val <= 0) return res.status(400).json({ ok: false, error: 'battery_critical_mv must be a positive integer' });
+    config.BATTERY_CRITICAL_MV = val;
+    updated.battery_critical_mv = val;
+  }
+  if (req.body.max_pump_duration_ms !== undefined) {
+    const val = parseInt(req.body.max_pump_duration_ms, 10);
+    if (isNaN(val) || val < 1000) return res.status(400).json({ ok: false, error: 'max_pump_duration_ms must be >= 1000' });
+    config.MAX_PUMP_DURATION_MS = val;
+    updated.max_pump_duration_ms = val;
+  }
+  if (req.body.min_cooldown_ms !== undefined) {
+    const val = parseInt(req.body.min_cooldown_ms, 10);
+    if (isNaN(val) || val < 0) return res.status(400).json({ ok: false, error: 'min_cooldown_ms must be >= 0' });
+    config.MIN_COOLDOWN_MS = val;
+    updated.min_cooldown_ms = val;
+  }
+
+  if (Object.keys(updated).length === 0) {
+    return res.status(400).json({ ok: false, error: 'No recognized config keys provided. Accepted: battery_low_mv, battery_critical_mv, max_pump_duration_ms, min_cooldown_ms' });
+  }
+
+  res.json({ ok: true, updated });
+});
+
+// Prometheus-compatible metrics
+app.get('/metrics', (_req, res) => {
+  const status = relay.getStatus();
+  const lines = [];
+
+  lines.push('# HELP monsoon_relay_on Relay on state (1=on, 0=off)');
+  lines.push('# TYPE monsoon_relay_on gauge');
+  for (const ch of status.channels) {
+    lines.push(`monsoon_relay_on{channel="${ch.channel}"} ${ch.on ? 1 : 0}`);
+  }
+
+  lines.push('# HELP monsoon_relay_active_ms Current active duration in milliseconds');
+  lines.push('# TYPE monsoon_relay_active_ms gauge');
+  for (const ch of status.channels) {
+    lines.push(`monsoon_relay_active_ms{channel="${ch.channel}"} ${ch.active_ms}`);
+  }
+
+  lines.push('# HELP monsoon_relay_toggle_total Total number of relay activations');
+  lines.push('# TYPE monsoon_relay_toggle_total counter');
+  for (let i = 0; i < config.TOTAL_CHANNELS; i++) {
+    const h = relay.getChannelHistory(i);
+    lines.push(`monsoon_relay_toggle_total{channel="${i}"} ${h.toggle_count}`);
+  }
+
+  lines.push('# HELP monsoon_relay_on_ms_total Total milliseconds relay has been on');
+  lines.push('# TYPE monsoon_relay_on_ms_total counter');
+  for (let i = 0; i < config.TOTAL_CHANNELS; i++) {
+    const h = relay.getChannelHistory(i);
+    lines.push(`monsoon_relay_on_ms_total{channel="${i}"} ${h.total_on_ms}`);
+  }
+
+  lines.push('# HELP monsoon_sequence_running Whether a sequence is currently running (1=yes)');
+  lines.push('# TYPE monsoon_sequence_running gauge');
+  lines.push(`monsoon_sequence_running ${status.sequence_running ? 1 : 0}`);
+
+  lines.push('# HELP monsoon_process_uptime_seconds Process uptime in seconds');
+  lines.push('# TYPE monsoon_process_uptime_seconds gauge');
+  lines.push(`monsoon_process_uptime_seconds ${Math.floor(process.uptime())}`);
+
+  res.set('Content-Type', 'text/plain; version=0.0.4');
+  res.send(lines.join('\n') + '\n');
+});
+
+// Active alerts — battery, power, relay safety cutoffs
+app.get('/alerts', (_req, res) => {
+  const alerts = [];
+
+  if (!config.DUMMY_MODE) {
+    const vbRaw = wdtExec('-g vb', true);
+    const mv = vbRaw ? parseInt(vbRaw, 10) : null;
+    if (mv !== null) {
+      if (mv < config.BATTERY_CRITICAL_MV) {
+        alerts.push({ level: 'critical', source: 'battery', message: `Battery critically low: ${mv}mV (threshold: ${config.BATTERY_CRITICAL_MV}mV)`, mv });
+      } else if (mv < config.BATTERY_LOW_MV) {
+        alerts.push({ level: 'warning', source: 'battery', message: `Battery low: ${mv}mV (threshold: ${config.BATTERY_LOW_MV}mV)`, mv });
+      }
+    }
+
+    const vinRaw = wdtExec('-g vin', true);
+    const vin = vinRaw ? parseInt(vinRaw, 10) : null;
+    if (vin !== null && vin < 4000) {
+      alerts.push({ level: 'warning', source: 'power', message: `Input power low or absent: ${vin}mV — running on battery`, vin });
+    }
+  }
+
+  const recentLog = relay.getLog(100);
+  const cutoffs = recentLog.filter(e => e.event === 'safety_cutoff');
+  for (const cut of cutoffs) {
+    alerts.push({ level: 'warning', source: 'relay', message: `Channel ${cut.channel} was force-cut at max duration`, timestamp: cut.timestamp, channel: cut.channel });
+  }
+
+  res.json({ ok: true, count: alerts.length, alerts });
+});
+
 // ============================================================
 //  WATCHDOG
 // ============================================================
@@ -263,6 +428,7 @@ app.post('/watchdog/reset', (_req, res) => {
 
   const result = wdtExec('-r');
   if (result !== null) {
+    logWatchdog({ event: 'watchdog_reset' });
     res.json({ ok: true, action: 'watchdog_reset' });
   } else {
     res.status(500).json({ ok: false, error: 'Watchdog reset failed' });
@@ -338,6 +504,35 @@ app.get('/watchdog/battery', (_req, res) => {
   res.json({ ok: mv !== null, mv, level });
 });
 
+// Reboot the Pi (relays off first, then OS reboot after 2s)
+app.post('/watchdog/reboot', (_req, res) => {
+  if (config.DUMMY_MODE) {
+    console.log('[DUMMY] reboot requested');
+    return res.json({ ok: true, action: 'reboot', dummy: true });
+  }
+
+  relay.allOff();
+  logWatchdog({ event: 'reboot' });
+
+  res.json({ ok: true, action: 'reboot', message: 'Rebooting in ~2 seconds' });
+
+  setTimeout(() => {
+    console.log('[WATCHDOG] Executing reboot');
+    try {
+      execSync('shutdown -r now', { timeout: 3000, stdio: 'pipe' });
+    } catch (err) {
+      console.error('[WATCHDOG] Reboot failed:', err.message);
+    }
+  }, 2000);
+});
+
+// In-memory watchdog event log (resets, power-offs, reboots since last startup)
+app.get('/watchdog/log', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 50;
+  const n = Math.min(limit, WATCHDOG_LOG_MAX);
+  res.json({ entries: watchdogLog.slice(-n) });
+});
+
 // Set watchdog timeout period (seconds). If the cron/service doesn't feed
 // within this window, the HAT hard-reboots the Pi.
 app.put('/watchdog/period', (req, res) => {
@@ -397,6 +592,7 @@ app.post('/watchdog/power-off', (req, res) => {
   relay.allOff();
 
   // Respond before we lose power
+  logWatchdog({ event: 'power_off' });
   res.json({ ok: true, action: 'power_off', message: 'Powering off in ~2 seconds' });
 
   // Give the response time to flush, then cut power
