@@ -64,7 +64,7 @@ const WATCHDOG_DEFAULT_PERIOD_S = 120;
 // Set to true to log relay/watchdog commands instead of sending them to hardware.
 // The env var MONSOON_DUMMY=0 overrides this to false (live hardware).
 // The env var MONSOON_DUMMY=1 overrides this to true (force dummy).
-const DUMMY_MODE_DEFAULT = true;
+const DUMMY_MODE_DEFAULT = false;
 
 // ---------------------------------------------------------------------------
 // RUNTIME
