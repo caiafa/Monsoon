@@ -59,6 +59,14 @@ const BATTERY_CRITICAL_MV = 3600; // initiate safe shutdown
 const WATCHDOG_DEFAULT_PERIOD_S = 120;
 
 // ---------------------------------------------------------------------------
+// DUMMY MODE
+// ---------------------------------------------------------------------------
+// Set to true to log relay/watchdog commands instead of sending them to hardware.
+// The env var MONSOON_DUMMY=0 overrides this to false (live hardware).
+// The env var MONSOON_DUMMY=1 overrides this to true (force dummy).
+const DUMMY_MODE_DEFAULT = true;
+
+// ---------------------------------------------------------------------------
 // RUNTIME
 // ---------------------------------------------------------------------------
 module.exports = {
@@ -72,7 +80,7 @@ module.exports = {
   BATTERY_CRITICAL_MV,
   WATCHDOG_DEFAULT_PERIOD_S,
   PORT: parseInt(process.env.MONSOON_PORT, 10) || 80,
-  // Dummy mode: relay/watchdog commands are logged but not sent to hardware.
-  // Default ON (safe) — set MONSOON_DUMMY=0 in the systemd service for live hardware.
-  DUMMY_MODE: process.env.MONSOON_DUMMY !== '0',
+  DUMMY_MODE: process.env.MONSOON_DUMMY === '0' ? false
+            : process.env.MONSOON_DUMMY === '1' ? true
+            : DUMMY_MODE_DEFAULT,
 };
