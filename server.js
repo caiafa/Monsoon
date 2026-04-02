@@ -669,8 +669,8 @@ function loadPumpCalibration() {
 loadPumpCalibration();
 relay.allOff();
 
-app.listen(config.PORT, '0.0.0.0', () => {
-  console.log(`monsoon relay agent listening on :${config.PORT}`);
+app.listen(config.PORT, config.HOST, () => {
+  console.log(`monsoon relay agent listening on ${config.HOST}:${config.PORT}`);
   console.log(`dummy mode: ${config.DUMMY_MODE}`);
   console.log(`hats configured: ${config.HATS.length}`);
   console.log(`pumps total: ${config.PUMPS.length} (${config.PUMPS.filter(p => p.enabled).length} enabled)`);
