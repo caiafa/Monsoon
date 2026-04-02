@@ -83,7 +83,7 @@ module.exports = {
   // Listen address — '127.0.0.1' when agent and client are on the same machine
   // (agent is unreachable from the network). '0.0.0.0' to expose on the LAN.
   // Override with MONSOON_HOST env var.
-  HOST: process.env.MONSOON_HOST || '127.0.0.1',
+  HOST: process.env.MONSOON_HOST || '0.0.0.0',
   DUMMY_MODE: process.env.MONSOON_DUMMY === '0' ? false
             : process.env.MONSOON_DUMMY === '1' ? true
             : DUMMY_MODE_DEFAULT,
