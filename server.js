@@ -4,6 +4,7 @@
 const express = require('express');
 const { execSync } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 const os = require('os');
 const config = require('./config');
 const relay = require('./relay');
@@ -225,6 +226,7 @@ app.put('/pumps/:id', (req, res) => {
     pump.flow_ml_per_s = flow;
   }
 
+  savePumpCalibration();
   res.json({ ok: true, pump });
 });
 
@@ -624,10 +626,47 @@ app.post('/watchdog/power-off', (req, res) => {
 });
 
 // ============================================================
+//  PUMP CALIBRATION PERSISTENCE
+// ============================================================
+
+const PUMPS_FILE = path.join(__dirname, 'pumps.json');
+
+// Persist mutable pump fields (name, enabled, flow_ml_per_s) to disk.
+// Called after every successful PUT /pumps/:id.
+function savePumpCalibration() {
+  const data = {};
+  for (const pump of config.PUMPS) {
+    data[pump.id] = { name: pump.name, enabled: pump.enabled, flow_ml_per_s: pump.flow_ml_per_s };
+  }
+  fs.writeFileSync(PUMPS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Load saved pump config from disk and merge into the in-memory PUMPS array.
+// Hardware fields (board_index, channel) always come from config.js — only
+// mutable fields are restored. Unknown pump IDs in the file are silently ignored
+// (handles HATS config changes between restarts).
+function loadPumpCalibration() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(PUMPS_FILE, 'utf8'));
+    for (const pump of config.PUMPS) {
+      const s = saved[pump.id];
+      if (!s) continue;
+      if (s.name !== undefined) pump.name = s.name;
+      if (s.enabled !== undefined) pump.enabled = Boolean(s.enabled);
+      if (typeof s.flow_ml_per_s === 'number' && s.flow_ml_per_s > 0) pump.flow_ml_per_s = s.flow_ml_per_s;
+    }
+    console.log(`pump calibration loaded from ${PUMPS_FILE}`);
+  } catch {
+    // File doesn't exist yet — first run, use defaults from config.js
+  }
+}
+
+// ============================================================
 //  START
 // ============================================================
 
-// --- Startup: ensure clean relay state ---
+// --- Startup: load saved calibration, then ensure clean relay state ---
+loadPumpCalibration();
 relay.allOff();
 
 app.listen(config.PORT, '0.0.0.0', () => {
