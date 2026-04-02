@@ -187,6 +187,22 @@ app.get('/pumps', (_req, res) => {
   res.json({ pumps: config.PUMPS });
 });
 
+// Available pump count — lightweight discovery endpoint for clients
+app.get('/pumps/available', (_req, res) => {
+  const total = config.PUMPS.length;
+  const enabled = config.PUMPS.filter(p => p.enabled).length;
+  res.json({
+    ok: true,
+    total_pumps: total,
+    enabled_pumps: enabled,
+    hats: config.HATS.map(h => ({
+      address: `0x${h.address.toString(16).toUpperCase()}`,
+      board_index: h.board_index,
+      pump_count: h.pump_count,
+    })),
+  });
+});
+
 // Get single pump config
 app.get('/pumps/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -617,7 +633,8 @@ relay.allOff();
 app.listen(config.PORT, '0.0.0.0', () => {
   console.log(`monsoon relay agent listening on :${config.PORT}`);
   console.log(`dummy mode: ${config.DUMMY_MODE}`);
-  console.log(`pumps configured: ${config.PUMPS.length}`);
+  console.log(`hats configured: ${config.HATS.length}`);
+  console.log(`pumps total: ${config.PUMPS.length} (${config.PUMPS.filter(p => p.enabled).length} enabled)`);
   console.log(`max pump duration: ${config.MAX_PUMP_DURATION_MS}ms`);
 });
 

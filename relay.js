@@ -43,8 +43,10 @@ function i2cWrite(channel, value) {
     return;
   }
 
-  const board = config.RELAY_BOARD_INDEX;  // configured stack index (MONSOON_BOARD_INDEX)
-  const relay = (channel % 16) + 1;       // CLI expects 1-16
+  const pump = config.PUMPS.find(p => p.id === channel);
+  if (!pump) throw new Error(`No pump configured for channel ${channel}`);
+  const board = pump.board_index;
+  const relay = pump.channel + 1; // CLI expects 1-16
   const state = value ? 1 : 0;
   const cmd = `16relind ${board} write ${relay} ${state}`;
 
@@ -75,10 +77,13 @@ function allOffHardware() {
     return;
   }
 
-  try {
-    execSync(`16relind ${config.RELAY_BOARD_INDEX} write 0`, { timeout: 3000, stdio: 'pipe' });
-  } catch (err) {
-    console.error(`[I2C] Failed to clear board ${config.RELAY_BOARD_INDEX}: ${err.message}`);
+  const boards = [...new Set(config.PUMPS.map(p => p.board_index))];
+  for (const board of boards) {
+    try {
+      execSync(`16relind ${board} write 0`, { timeout: 3000, stdio: 'pipe' });
+    } catch (err) {
+      console.error(`[I2C] Failed to clear board ${board}: ${err.message}`);
+    }
   }
 }
 

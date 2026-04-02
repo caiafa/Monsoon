@@ -6,11 +6,129 @@ All request/response bodies are JSON. All responses include an `ok` boolean. In 
 
 ---
 
+## Pump Discovery
+
+The agent exposes a flat list of pumps numbered `0` to `N-1`. Clients never need to know about the underlying HAT hardware — pump IDs are stable global identifiers.
+
+### GET /pumps/available
+
+Lightweight discovery endpoint. Returns total pump capacity and per-HAT breakdown. Call this once at startup to learn how many pumps exist.
+
+**Response**
+
+```json
+{
+  "ok": true,
+  "total_pumps": 14,
+  "enabled_pumps": 14,
+  "hats": [
+    { "address": "0x20", "board_index": 0, "pump_count": 14 }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_pumps` | number | Total pumps across all HATs |
+| `enabled_pumps` | number | Pumps currently set to `enabled: true` |
+| `hats` | array | One entry per configured HAT (informational) |
+
+---
+
+## Pump Configuration
+
+Pump config is held in memory and resets on restart. Pump IDs run `0` to `total_pumps - 1`.
+
+### GET /pumps
+
+Get all pump configurations.
+
+**Response**
+
+```json
+{
+  "pumps": [
+    { "id": 0, "board_index": 0, "channel": 0, "name": "pump-00", "enabled": true, "flow_ml_per_s": 1.0 },
+    { "id": 1, "board_index": 0, "channel": 1, "name": "pump-01", "enabled": true, "flow_ml_per_s": 1.0 }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | number | Global pump id (use this in all pump operations) |
+| `board_index` | number | HAT stack index the pump is physically on (informational) |
+| `channel` | number | Local relay channel on that HAT (informational) |
+| `name` | string | Human-readable label |
+| `enabled` | boolean | Whether the pump can be activated |
+| `flow_ml_per_s` | number | Calibrated flow rate |
+
+---
+
+### GET /pumps/:id
+
+Get a single pump's configuration.
+
+**URL params**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | number | Pump id (0 to total_pumps-1) |
+
+**Response (200)**
+
+```json
+{ "id": 0, "board_index": 0, "channel": 0, "name": "pump-00", "enabled": true, "flow_ml_per_s": 1.0 }
+```
+
+**Errors (404)**
+
+```json
+{ "ok": false, "error": "Pump 5 not found" }
+```
+
+---
+
+### PUT /pumps/:id
+
+Update a pump's name, enabled state, or calibrated flow rate. All fields optional.
+
+**URL params**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | number | Pump id (0 to total_pumps-1) |
+
+**Body**
+
+```json
+{ "name": "tomatoes-left", "enabled": true, "flow_ml_per_s": 1.35 }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | no | Human-readable pump name |
+| `enabled` | boolean | no | Whether the pump can be activated |
+| `flow_ml_per_s` | number | no | Calibrated flow rate (must be > 0) |
+
+**Response (200)**
+
+```json
+{
+  "ok": true,
+  "pump": { "id": 0, "board_index": 0, "channel": 0, "name": "tomatoes-left", "enabled": true, "flow_ml_per_s": 1.35 }
+}
+```
+
+---
+
 ## Relay Control
+
+These endpoints address pumps by their global ID. The agent handles routing to the correct HAT internally.
 
 ### GET /relay/status
 
-Get the state of all 16 relay channels.
+Get the state of all pump channels.
 
 **Response**
 
@@ -27,7 +145,7 @@ Get the state of all 16 relay channels.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `channels[].channel` | number | Channel index (0-15) |
+| `channels[].channel` | number | Global pump id |
 | `channels[].on` | boolean | Whether the relay is currently active |
 | `channels[].active_ms` | number | Milliseconds since activation (0 if off) |
 | `dummy_mode` | boolean | Whether the agent is in dummy mode |
@@ -37,13 +155,13 @@ Get the state of all 16 relay channels.
 
 ### POST /relay/:id/on
 
-Turn a single relay on. Stays on until explicitly turned off or the safety timer (120s) triggers.
+Turn a single pump relay on. Stays on until explicitly turned off or the safety timer triggers.
 
 **URL params**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Response (200)**
 
@@ -62,13 +180,13 @@ Turn a single relay on. Stays on until explicitly turned off or the safety timer
 
 ### POST /relay/:id/off
 
-Turn a single relay off.
+Turn a single pump relay off.
 
 **URL params**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Response (200)**
 
@@ -86,7 +204,7 @@ Turn a relay on for a specified duration, then auto-off.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Body**
 
@@ -96,7 +214,7 @@ Turn a relay on for a specified duration, then auto-off.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `duration_ms` | number | yes | Pulse duration in ms (100-120000) |
+| `duration_ms` | number | yes | Pulse duration in ms (100 – max_pump_duration_ms) |
 
 **Response (200)**
 
@@ -114,7 +232,7 @@ Dispense a specific volume of liquid. Duration is calculated from the pump's cal
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Pump id (0-13) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Body**
 
@@ -137,31 +255,31 @@ Dispense a specific volume of liquid. Duration is calculated from the pump's cal
 ```json
 { "ok": false, "error": "Pump 0 not found" }
 { "ok": false, "error": "Pump 0 is disabled" }
-{ "ok": false, "error": "Calculated duration 150000ms exceeds max — reduce volume or recalibrate" }
+{ "ok": false, "error": "Calculated duration 700000ms exceeds max — reduce volume or recalibrate" }
 ```
 
 ---
 
 ### POST /relay/all-off
 
-Emergency stop. Sends a hardware-level all-off command, then clears all internal state and timers.
+Emergency stop. Sends a hardware-level all-off command to every configured HAT, then clears all internal state and timers.
 
 **Response (200)**
 
 ```json
-{ "ok": true, "action": "all_off", "channels": 16 }
+{ "ok": true, "action": "all_off", "channels": 14 }
 ```
 
 ---
 
 ### POST /relay/all-on
 
-Activate all relay channels simultaneously. Intended for wiring and hardware tests.
+Activate all pump relays simultaneously. Intended for wiring and hardware tests.
 
 **Response (200)**
 
 ```json
-{ "ok": true, "action": "all_on", "succeeded": 16, "total": 16 }
+{ "ok": true, "action": "all_on", "succeeded": 14, "total": 14 }
 ```
 
 `succeeded` may be less than `total` if some channels are in cooldown.
@@ -170,13 +288,13 @@ Activate all relay channels simultaneously. Intended for wiring and hardware tes
 
 ### GET /relay/:id/history
 
-Per-channel activation statistics since last startup.
+Per-pump activation statistics since last startup.
 
 **URL params**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Response (200)**
 
@@ -204,13 +322,13 @@ Per-channel activation statistics since last startup.
 
 ### GET /relay/:id/safe-state
 
-Get the configured safe state for a channel (the state it should be in on startup).
+Get the configured safe state for a pump (the state it should be in on startup).
 
 **URL params**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Response (200)**
 
@@ -218,19 +336,19 @@ Get the configured safe state for a channel (the state it should be in on startu
 { "ok": true, "channel": 0, "safe_state": "off" }
 ```
 
-`safe_state` is `"on"` or `"off"`. Default is `"off"` for all channels.
+`safe_state` is `"on"` or `"off"`. Default is `"off"` for all pumps.
 
 ---
 
 ### PUT /relay/:id/safe-state
 
-Set the safe state for a channel.
+Set the safe state for a pump.
 
 **URL params**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `id` | number | Channel index (0-15) |
+| `id` | number | Pump id (0 to total_pumps-1) |
 
 **Body**
 
@@ -273,9 +391,9 @@ Start a watering sequence.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `steps` | array | yes | Non-empty array of step objects |
-| `steps[].pump_id` | number | yes | Pump id (0-13) |
-| `steps[].ml` | number | one of ml/duration_ms | Volume to dispense |
-| `steps[].duration_ms` | number | one of ml/duration_ms | Raw duration in ms |
+| `steps[].pump_id` | number | yes | Pump id (0 to total_pumps-1) |
+| `steps[].ml` | number | one of | Volume to dispense |
+| `steps[].duration_ms` | number | one of | Raw duration in ms |
 
 **Response (200)** — returned immediately, sequence runs in background
 
@@ -315,7 +433,7 @@ Step statuses: `pending`, `running`, `done`, `failed`, `skipped`, `aborted`
 
 ### POST /sequence/abort
 
-Abort a running sequence. Turns all relays off immediately. Remaining steps are marked `aborted`.
+Abort a running sequence. Turns all relays off immediately.
 
 **Response (200)**
 
@@ -333,7 +451,7 @@ Abort a running sequence. Turns all relays off immediately. Remaining steps are 
 
 ### GET /sequence/history
 
-Past sequence runs since last startup. Returns most recent entries first.
+Past sequence runs since last startup.
 
 **Query params**
 
@@ -375,84 +493,12 @@ Immediately abort any running sequence and turn all relays off. Logs the reason.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `reason` | string | no | Human-readable reason for the stop (logged) |
+| `reason` | string | no | Human-readable reason (logged) |
 
 **Response (200)**
 
 ```json
 { "ok": true, "action": "emergency_stop", "reason": "operator override" }
-```
-
----
-
-## Pump Configuration
-
-Pump config is held in memory (resets on restart). 14 pumps configured by default (ids 0-13).
-
-### GET /pumps
-
-Get all pump configurations.
-
-**Response**
-
-```json
-{
-  "pumps": [
-    { "id": 0, "channel": 0, "name": "pump-00", "enabled": true, "flow_ml_per_s": 1.0 },
-    { "id": 1, "channel": 1, "name": "pump-01", "enabled": true, "flow_ml_per_s": 1.0 }
-  ]
-}
-```
-
----
-
-### GET /pumps/:id
-
-Get a single pump's configuration.
-
-**URL params**
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `id` | number | Pump id (0-13) |
-
-**Response (200)**
-
-```json
-{ "id": 0, "channel": 0, "name": "pump-00", "enabled": true, "flow_ml_per_s": 1.0 }
-```
-
----
-
-### PUT /pumps/:id
-
-Update a pump's name, enabled state, or calibrated flow rate. All fields are optional.
-
-**URL params**
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `id` | number | Pump id (0-13) |
-
-**Body**
-
-```json
-{ "name": "tomatoes-left", "enabled": true, "flow_ml_per_s": 1.35 }
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | no | Human-readable pump name |
-| `enabled` | boolean | no | Whether the pump can be activated |
-| `flow_ml_per_s` | number | no | Calibrated flow rate (must be > 0) |
-
-**Response (200)**
-
-```json
-{
-  "ok": true,
-  "pump": { "id": 0, "channel": 0, "name": "tomatoes-left", "enabled": true, "flow_ml_per_s": 1.35 }
-}
 ```
 
 ---
@@ -481,9 +527,6 @@ In-memory ring buffer of the last 200 events. Resets on restart.
     { "event": "safety_cutoff", "channel": 3, "timestamp": "..." },
     { "event": "sequence_start", "steps": 3, "timestamp": "..." },
     { "event": "sequence_end", "aborted": false, "steps": 3, "timestamp": "..." },
-    { "event": "sequence_abort", "timestamp": "..." },
-    { "event": "all_off", "timestamp": "..." },
-    { "event": "all_on", "succeeded": 16, "total": 16, "timestamp": "..." },
     { "event": "emergency_stop", "reason": "operator override", "timestamp": "..." }
   ]
 }
@@ -542,13 +585,13 @@ Detailed system information including hardware sensors.
 
 Update runtime config values. Changes are in-memory only and reset on service restart.
 
-**Body** (all fields optional — send only what you want to change)
+**Body** (all fields optional)
 
 ```json
 {
   "battery_low_mv": 3700,
   "battery_critical_mv": 3600,
-  "max_pump_duration_ms": 120000,
+  "max_pump_duration_ms": 600000,
   "min_cooldown_ms": 5000
 }
 ```
@@ -566,17 +609,11 @@ Update runtime config values. Changes are in-memory only and reset on service re
 { "ok": true, "updated": { "max_pump_duration_ms": 60000 } }
 ```
 
-**Errors (400)**
-
-```json
-{ "ok": false, "error": "No recognized config keys provided. Accepted: battery_low_mv, battery_critical_mv, max_pump_duration_ms, min_cooldown_ms" }
-```
-
 ---
 
 ### GET /metrics
 
-Prometheus-compatible metrics endpoint. Returns relay states, cumulative on-times, toggle counts, and process uptime.
+Prometheus-compatible metrics endpoint.
 
 **Response** — `Content-Type: text/plain; version=0.0.4`
 
@@ -584,12 +621,10 @@ Prometheus-compatible metrics endpoint. Returns relay states, cumulative on-time
 # HELP monsoon_relay_on Relay on state (1=on, 0=off)
 # TYPE monsoon_relay_on gauge
 monsoon_relay_on{channel="0"} 0
-monsoon_relay_on{channel="1"} 1
 ...
 # HELP monsoon_relay_active_ms Current active duration in milliseconds
 # TYPE monsoon_relay_active_ms gauge
 monsoon_relay_active_ms{channel="0"} 0
-monsoon_relay_active_ms{channel="1"} 4320
 ...
 # HELP monsoon_relay_toggle_total Total number of relay activations
 # TYPE monsoon_relay_toggle_total counter
@@ -607,11 +642,13 @@ monsoon_sequence_running 0
 monsoon_process_uptime_seconds 86400
 ```
 
+Channel labels correspond to global pump IDs.
+
 ---
 
 ### GET /alerts
 
-Active warning conditions. Checks battery level, input power, and recent safety cutoffs.
+Active warning conditions: battery level, input power, recent safety cutoffs.
 
 **Response**
 
@@ -630,17 +667,11 @@ Active warning conditions. Checks battery level, input power, and recent safety 
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `level` | `"warning"` or `"critical"` |
-| `source` | `"battery"`, `"power"`, or `"relay"` |
-| `message` | Human-readable description |
-
-Alert conditions checked:
-- Battery voltage below `battery_low_mv` → `warning`
-- Battery voltage below `battery_critical_mv` → `critical`
-- Input voltage below 4000mV (running on battery) → `warning`
-- Any `safety_cutoff` events in the recent log → `warning`
+Alert conditions:
+- Battery below `battery_low_mv` → `warning`
+- Battery below `battery_critical_mv` → `critical`
+- Input voltage below 4000mV → `warning` (running on battery)
+- Any `safety_cutoff` events in recent log → `warning`
 
 In dummy mode, hardware checks are skipped; only log-based alerts fire.
 
@@ -648,7 +679,7 @@ In dummy mode, hardware checks are skipped; only log-based alerts fire.
 
 ## Watchdog
 
-Controls the Sequent Microsystems Multichemistry Watchdog HAT (SM-I-033). The watchdog reboots the Pi if not fed within its configured period.
+Controls the Sequent Microsystems Multichemistry Watchdog HAT (SM-I-033).
 
 ### POST /watchdog/reset
 
@@ -664,7 +695,7 @@ Feed the hardware watchdog timer, resetting its countdown.
 
 ### GET /watchdog/status
 
-Comprehensive watchdog status: battery health, input power, timeout period, restart policy, and reboot history.
+Comprehensive watchdog status: battery health, input power, timeout period, restart policy, reboot count.
 
 **Response**
 
@@ -687,10 +718,8 @@ Comprehensive watchdog status: battery health, input power, timeout period, rest
 | Field | Type | Description |
 |-------|------|-------------|
 | `battery.mv` | number/null | Battery voltage in millivolts |
-| `battery.level` | string | `ok` (>= 3700mV), `low` (3600-3699mV), `critical` (< 3600mV), or `unknown` |
-| `battery.low_threshold_mv` | number | Threshold for `low` level |
-| `battery.critical_threshold_mv` | number | Threshold for `critical` level |
-| `input_mv` | number/null | External power supply voltage in mV |
+| `battery.level` | string | `ok` (≥3700mV), `low` (3600–3699mV), `critical` (<3600mV), `unknown` |
+| `input_mv` | number/null | External supply voltage in mV |
 | `period_s` | number/null | Current watchdog timeout in seconds |
 | `restart_on_battery` | boolean | Whether Pi reboots when external power returns |
 | `reset_count` | number/null | Times the watchdog has rebooted the Pi |
@@ -699,7 +728,7 @@ Comprehensive watchdog status: battery health, input power, timeout period, rest
 
 ### GET /watchdog/battery
 
-Lightweight battery check for frequent dashboard polling.
+Lightweight battery check for frequent polling.
 
 **Response**
 
@@ -711,9 +740,9 @@ Lightweight battery check for frequent dashboard polling.
 
 ### POST /watchdog/reboot
 
-Gracefully reboot the Pi. Turns all relays off first, then issues an OS reboot after a 2-second delay so the response can be received.
+Gracefully reboot the Pi. Turns all relays off first, then reboots after ~2s.
 
-**Response (200)** — returned before the reboot occurs
+**Response (200)**
 
 ```json
 { "ok": true, "action": "reboot", "message": "Rebooting in ~2 seconds" }
@@ -723,7 +752,7 @@ Gracefully reboot the Pi. Turns all relays off first, then issues an OS reboot a
 
 ### GET /watchdog/log
 
-In-memory log of watchdog-level events since last startup: resets, reboots, and power-offs.
+In-memory log of watchdog-level events since last startup.
 
 **Query params**
 
@@ -737,8 +766,7 @@ In-memory log of watchdog-level events since last startup: resets, reboots, and 
 {
   "entries": [
     { "event": "watchdog_reset", "timestamp": "2026-03-28T08:00:00.000Z" },
-    { "event": "reboot", "timestamp": "2026-03-28T09:00:00.000Z" },
-    { "event": "power_off", "timestamp": "2026-03-28T10:00:00.000Z" }
+    { "event": "reboot", "timestamp": "2026-03-28T09:00:00.000Z" }
   ]
 }
 ```
@@ -747,7 +775,7 @@ In-memory log of watchdog-level events since last startup: resets, reboots, and 
 
 ### PUT /watchdog/period
 
-Set the watchdog timeout period. If the watchdog isn't fed within this window, the HAT hard-reboots the Pi.
+Set the watchdog timeout period. If not fed within this window, the HAT hard-reboots the Pi.
 
 **Body**
 
@@ -757,7 +785,7 @@ Set the watchdog timeout period. If the watchdog isn't fed within this window, t
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `seconds` | number | yes | Timeout period (10-65535 seconds) |
+| `seconds` | number | yes | Timeout period (10–65535 seconds) |
 
 **Response (200)**
 
@@ -769,17 +797,13 @@ Set the watchdog timeout period. If the watchdog isn't fed within this window, t
 
 ### PUT /watchdog/restart-on-battery
 
-Toggle whether the Pi automatically restarts when external power is restored after running on battery.
+Toggle whether the Pi automatically restarts when external power is restored.
 
 **Body**
 
 ```json
 { "enabled": true }
 ```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `enabled` | boolean | yes | Enable or disable restart-on-battery |
 
 **Response (200)**
 
@@ -791,9 +815,7 @@ Toggle whether the Pi automatically restarts when external power is restored aft
 
 ### POST /watchdog/power-off
 
-Safely power off the Pi via the watchdog HAT. Turns all relays off first, then cuts power after a 2-second delay. Requires explicit confirmation to prevent accidental shutdowns.
-
-The Pi will NOT restart unless external power is cycled and restart-on-battery is enabled.
+Safely power off the Pi via the watchdog HAT. Requires explicit confirmation.
 
 **Body**
 
@@ -801,17 +823,13 @@ The Pi will NOT restart unless external power is cycled and restart-on-battery i
 { "confirm": true }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `confirm` | boolean | yes | Must be `true` to proceed |
-
 **Response (200)**
 
 ```json
 { "ok": true, "action": "power_off", "message": "Powering off in ~2 seconds" }
 ```
 
-**Errors (400)** — if confirm is missing or false
+**Errors (400)**
 
 ```json
 { "ok": false, "error": "Send { \"confirm\": true } to power off. This will cut power to the Pi." }
@@ -821,16 +839,14 @@ The Pi will NOT restart unless external power is cycled and restart-on-battery i
 
 ## Error Format
 
-All error responses follow the same shape:
-
 ```json
 { "ok": false, "error": "Human-readable error description" }
 ```
 
-HTTP status codes used:
+HTTP status codes:
 - **200** — Success
 - **400** — Bad request (invalid input, cooldown, already active, etc.)
-- **404** — Resource not found (unknown pump or channel id)
+- **404** — Resource not found (unknown pump id)
 - **500** — Internal error (I2C failure, watchdog command failed)
 
 ---
@@ -839,13 +855,30 @@ HTTP status codes used:
 
 | Mechanism | Value | Description |
 |-----------|-------|-------------|
-| Max pump duration | 120s | Any relay auto-stops after 2 minutes |
-| Cooldown | 5s | Minimum gap between activations of the same channel |
-| Startup all-off | — | All relays forced off when the service starts |
+| Max pump duration | 600s | Any relay auto-stops after 10 minutes |
+| Cooldown | 5s | Minimum gap between activations of the same pump |
+| Startup all-off | — | All HATs forced off when the service starts |
 | Graceful shutdown | — | SIGTERM/SIGINT turn all relays off before exit |
 | Emergency stop | `POST /emergency-stop` | Abort sequence + hardware all-off + logged reason |
-| Basic all-off | `POST /relay/all-off` | Hardware-level all-off + clear timers |
+| Basic all-off | `POST /relay/all-off` | Hardware-level all-off on all HATs + clear timers |
 | Power-off guard | `confirm: true` | Prevents accidental remote shutdown |
+
+---
+
+## Configuration
+
+HAT layout and pump count are configured in `config.js`. Clients never need to reference HATs directly.
+
+To add a second HAT, edit the `HATS` array in `config.js`:
+
+```js
+const HATS = [
+  { address: 0x20, board_index: 0, pump_count: 14 },
+  { address: 0x21, board_index: 1, pump_count: 16 },
+];
+```
+
+Pump IDs are reassigned automatically on restart: HAT-0 gets `0..13`, HAT-1 gets `14..29`.
 
 ---
 
