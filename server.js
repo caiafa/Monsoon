@@ -86,8 +86,9 @@ app.post('/relay/:id/dispense', (req, res) => {
   res.status(result.ok ? 200 : 400).json(result);
 });
 
-// Emergency — all relays off immediately
+// Emergency — all relays off immediately (also clears fan hardware relay)
 app.post('/relay/all-off', (_req, res) => {
+  fanState = false;
   res.json(relay.allOff());
 });
 
@@ -173,10 +174,61 @@ app.get('/sequence/history', (req, res) => {
   res.json({ entries: relay.getSequenceHistory(limit) });
 });
 
-// Emergency stop — abort sequence + all relays off + log reason
+// Emergency stop — abort sequence + all relays off + log reason (also clears fan)
 app.post('/emergency-stop', (req, res) => {
+  fanState = false;
   const reason = req.body && req.body.reason ? String(req.body.reason) : null;
   res.json(relay.emergencyStop(reason));
+});
+
+// ============================================================
+//  FAN — optional 12V fan on last relay of board 0
+// ============================================================
+//
+// Wired to board 0, relay 16 (16relind CLI uses 1-indexed relay numbers).
+// Tracked independently from pump relays. Default state: ON.
+// Note: /relay/all-off and /emergency-stop also clear the fan relay at the
+// hardware level (all-relay bitmask write) — fanState is updated accordingly.
+
+let fanState = true; // default: on
+
+function setFanHardware(on) {
+  if (config.DUMMY_MODE) {
+    console.log(`[DUMMY] fan -> ${on ? 'ON' : 'OFF'}`);
+    return;
+  }
+  const state = on ? 1 : 0;
+  try {
+    execSync(`16relind ${config.FAN_BOARD} write ${config.FAN_RELAY} ${state}`, { timeout: 3000, stdio: 'pipe' });
+  } catch (err) {
+    const msg = err.stderr ? err.stderr.toString().trim() : err.message;
+    console.error(`[FAN] Hardware write failed: ${msg}`);
+    throw new Error(`Fan hardware write failed: ${msg}`);
+  }
+}
+
+app.get('/fan/status', (_req, res) => {
+  res.json({ ok: true, on: fanState });
+});
+
+app.post('/fan/on', (_req, res) => {
+  try {
+    setFanHardware(true);
+    fanState = true;
+    res.json({ ok: true, action: 'fan_on' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/fan/off', (_req, res) => {
+  try {
+    setFanHardware(false);
+    fanState = false;
+    res.json({ ok: true, action: 'fan_off' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ============================================================
@@ -667,7 +719,12 @@ function loadPumpCalibration() {
 
 // --- Startup: load saved calibration, then ensure clean relay state ---
 loadPumpCalibration();
-relay.allOff();
+relay.allOff(); // clears all hardware relays including fan relay
+try {
+  setFanHardware(true); // fan default: on
+} catch (err) {
+  console.error('[FAN] Failed to turn on fan at startup:', err.message);
+}
 
 app.listen(config.PORT, config.HOST, () => {
   console.log(`monsoon relay agent listening on ${config.HOST}:${config.PORT}`);

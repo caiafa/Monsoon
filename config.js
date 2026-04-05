@@ -41,6 +41,14 @@ for (const hat of HATS) {
 const TOTAL_CHANNELS = PUMPS.length;
 
 // ---------------------------------------------------------------------------
+// FAN — optional 12V fan on the last relay of the first board
+// ---------------------------------------------------------------------------
+// Wired to board 0, relay 16 (last of 16 relays, 1-indexed as 16relind expects).
+// This relay is separate from the pump range and controlled independently.
+const FAN_BOARD = 0;
+const FAN_RELAY = 16; // 1-indexed
+
+// ---------------------------------------------------------------------------
 // SAFETY
 // ---------------------------------------------------------------------------
 
@@ -79,6 +87,8 @@ module.exports = {
   BATTERY_LOW_MV,
   BATTERY_CRITICAL_MV,
   WATCHDOG_DEFAULT_PERIOD_S,
+  FAN_BOARD,
+  FAN_RELAY,
   PORT: parseInt(process.env.MONSOON_PORT, 10) || 80,
   // Listen address — '127.0.0.1' when agent and client are on the same machine
   // (agent is unreachable from the network). '0.0.0.0' to expose on the LAN.
